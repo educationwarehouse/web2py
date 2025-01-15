@@ -16,9 +16,13 @@ Holds:
 
 import copy
 import datetime
+import io
 import os
 import re
 from functools import reduce
+from urllib.parse import quote as urllib_quote
+from urllib.parse import unquote as urllib_unquote
+from urllib.parse import urlencode
 
 from pydal.adapters.base import CALLABLETYPES
 from pydal.base import DEFAULT
@@ -29,9 +33,6 @@ from pydal.helpers.methods import (_repr_ref, bar_encode, merge_tablemaps,
 from pydal.objects import Expression, Field, Row, Rows, Set, Table
 
 import gluon.serializers as serializers
-from gluon._compat import (StringIO, basestring, integer_types, iteritems,
-                           long, to_native, to_unicode, unichr, unicodeT,
-                           urlencode, urllib_quote)
 from gluon.globals import current
 from gluon.html import (BR, CAT, COL, COLGROUP, DEFAULT_PASSWORD_DISPLAY, DIV,
                         FIELDSET, FORM, IMG, INPUT, LABEL, LI, OPTION, SCRIPT,
@@ -159,19 +160,19 @@ def pluralize(singular, rules=None):
         global PLURALIZE_RULES
         if PLURALIZE_RULES is None:
             PLURALIZE_RULES = [
-                (re.compile("child$"), re.compile("child$"), "children"),
-                (re.compile("oot$"), re.compile("oot$"), "eet"),
-                (re.compile("ooth$"), re.compile("ooth$"), "eeth"),
-                (re.compile("l[eo]af$"), re.compile("l([eo])af$"), "l\\1aves"),
-                (re.compile("sis$"), re.compile("sis$"), "ses"),
-                (re.compile("man$"), re.compile("man$"), "men"),
-                (re.compile("ife$"), re.compile("ife$"), "ives"),
-                (re.compile("eau$"), re.compile("eau$"), "eaux"),
-                (re.compile("lf$"), re.compile("lf$"), "lves"),
-                (re.compile("[sxz]$"), re.compile("$"), "es"),
-                (re.compile("[^aeioudgkprt]h$"), re.compile("$"), "es"),
-                (re.compile("(qu|[^aeiou])y$"), re.compile("y$"), "ies"),
-                (re.compile("$"), re.compile("$"), "s"),
+                (re.compile(r"child$"), re.compile(r"child$"), "children"),
+                (re.compile(r"oot$"), re.compile(r"oot$"), "eet"),
+                (re.compile(r"ooth$"), re.compile(r"ooth$"), "eeth"),
+                (re.compile(r"l[eo]af$"), re.compile(r"l([eo])af$"), "l\\1aves"),
+                (re.compile(r"sis$"), re.compile(r"sis$"), "ses"),
+                (re.compile(r"man$"), re.compile(r"man$"), "men"),
+                (re.compile(r"ife$"), re.compile(r"ife$"), "ives"),
+                (re.compile(r"eau$"), re.compile(r"eau$"), "eaux"),
+                (re.compile(r"lf$"), re.compile(r"lf$"), "lves"),
+                (re.compile(r"[sxz]$"), re.compile(r"$"), "es"),
+                (re.compile(r"[^aeioudgkprt]h$"), re.compile(r"$"), "es"),
+                (re.compile(r"(qu|[^aeiou])y$"), re.compile(r"y$"), "ies"),
+                (re.compile(r"$"), re.compile(r"$"), "s"),
             ]
         rules = PLURALIZE_RULES
     for line in rules:
@@ -303,7 +304,7 @@ class JSONWidget(FormWidget):
 
         see also: `FormWidget.widget`
         """
-        if not isinstance(value, basestring):
+        if not isinstance(value, str):
             if value is not None:
                 value = serializers.json(value)
         default = dict(value=value)
@@ -499,7 +500,7 @@ class CheckboxesWidget(OptionsWidget):
         see also: `FormWidget.widget`
         """
 
-        # was values = re.compile('[\w\-:]+').findall(str(value))
+        # was values = re.compile(r'[\w\-:]+').findall(str(value))
         if isinstance(value, (list, tuple)):
             values = [str(v) for v in value]
         else:
@@ -914,10 +915,9 @@ class AutocompleteWidget(object):
             else:
                 record = self.db(self.fields[1] == value).select(self.fields[0]).first()
             attr["value"] = record and record[self.fields[0].name]
-            attr[
-                "_onblur"
-            ] = "jQuery('#%(div_id)s').delay(500).fadeOut('slow');" % dict(
-                div_id=div_id, u="F" + self.keyword
+            attr["_onblur"] = (
+                "jQuery('#%(div_id)s').delay(500).fadeOut('slow');"
+                % dict(div_id=div_id, u="F" + self.keyword)
             )
             js = """
             (function($) {
@@ -989,10 +989,9 @@ class AutocompleteWidget(object):
             )
         else:
             attr["_name"] = field.name
-            attr[
-                "_onblur"
-            ] = "jQuery('#%(div_id)s').delay(500).fadeOut('slow');" % dict(
-                div_id=div_id, u="F" + self.keyword
+            attr["_onblur"] = (
+                "jQuery('#%(div_id)s').delay(500).fadeOut('slow');"
+                % dict(div_id=div_id, u="F" + self.keyword)
             )
             js = """
             (function($) {
@@ -1365,7 +1364,6 @@ def formstyle_bootstrap4_inline_factory(col_label_size=3):
 
 
 class SQLFORM(FORM):
-
     """
     SQLFORM is used to map a table (and a current record) into an HTML form.
 
@@ -1549,7 +1547,7 @@ class SQLFORM(FORM):
 
         # try to retrieve the indicated record using its id
         # otherwise ignore it
-        if record and isinstance(record, (int, long, str, unicodeT)):
+        if record and isinstance(record, (int, str)):
             if not str(record).isdigit():
                 raise HTTP(404, "Object not found")
             record = table._db(table._id == record).select().first()
@@ -1833,14 +1831,14 @@ class SQLFORM(FORM):
                 self["hidden"]["id"] = record[table._id.name]
 
         (begin, end) = self._xml()
-        self.custom.begin = XML("<%s %s>" % (self.tag, to_native(begin)))
-        self.custom.end = XML("%s</%s>" % (to_native(end), self.tag))
+        self.custom.begin = XML("<%s %s>" % (self.tag, begin))
+        self.custom.end = XML("%s</%s>" % (end, self.tag))
         table = self.createform(xfields)
         self.components = [table]
 
     def createform(self, xfields):
         formstyle = self.formstyle
-        if isinstance(formstyle, basestring):
+        if isinstance(formstyle, str):
             if formstyle in SQLFORM.formstyles:
                 formstyle = SQLFORM.formstyles[formstyle]
             else:
@@ -2121,9 +2119,9 @@ class SQLFORM(FORM):
                         original_filename = os.path.split(f)[1]
                 elif hasattr(f, "file"):
                     (source_file, original_filename) = (f.file, f.filename)
-                elif isinstance(f, (str, unicodeT)):
+                elif isinstance(f, str):
                     # do not know why this happens, it should not
-                    (source_file, original_filename) = (StringIO(f), "file.txt")
+                    (source_file, original_filename) = (io.StringIO(f), "file.txt")
                 else:
                     # this should never happen, why does it happen?
                     # print 'f=', repr(f)
@@ -2209,9 +2207,17 @@ class SQLFORM(FORM):
                 if record_id:
                     self.vars.id = self.record[self.id_field_name]
                     if fields:
-                        self.table._db(
-                            self.table._id == self.record[self.id_field_name]
-                        ).update(**fields)
+                        # Remove fields that haven't changed.
+                        fields = {
+                            name: value
+                            for name, value in fields.items()
+                            if self.record.get(name) != value
+                        }
+                        # update only if something has changed
+                        if fields:
+                            self.table._db(
+                                self.table._id == self.record[self.id_field_name]
+                            ).update(**fields)
                 else:
                     self.vars.id = self.table.insert(**fields)
 
@@ -2701,7 +2707,7 @@ class SQLFORM(FORM):
                     nrows = dbset.db._adapter.count(dbset.query, limit=1000)
                 else:
                     nrows = dbset.count(cache=cache_count)
-            elif isinstance(cache_count, integer_types):
+            elif isinstance(cache_count, int):
                 nrows = cache_count
             elif callable(cache_count):
                 nrows = cache_count(dbset, request.vars)
@@ -2825,7 +2831,7 @@ class SQLFORM(FORM):
             for table in tables:
                 fields += list(filter(filter1, table))
                 columns += list(filter(filter2, table))
-                for k, f in iteritems(table):
+                for k, f in table.items():
                     if not k.startswith("_"):
                         if isinstance(f, Field.Virtual) and f.readable:
                             f.tablename = table._tablename
@@ -3069,7 +3075,7 @@ class SQLFORM(FORM):
                                     selectable_columns.append(str(field))
                     # look for virtual fields not displayed (and virtual method
                     # fields to be added here?)
-                    for field_name, field in iteritems(table):
+                    for field_name, field in table.items():
                         if (
                             isinstance(field, Field.Virtual)
                             and not str(field) in expcolumns
@@ -3169,10 +3175,12 @@ class SQLFORM(FORM):
                             _value=keywords,
                             _id=skeywords_id,
                             _class="form-control",
-                            _onfocus="jQuery('#%s').change();jQuery('#%s').slideDown();"
-                            % (spanel_id, sfields_id)
-                            if advanced_search
-                            else "",
+                            _onfocus=(
+                                "jQuery('#%s').change();jQuery('#%s').slideDown();"
+                                % (spanel_id, sfields_id)
+                                if advanced_search
+                                else ""
+                            ),
                         ),
                         INPUT(
                             _type="submit",
@@ -3672,7 +3680,7 @@ class SQLFORM(FORM):
         links_in_grid=True,
         args=None,
         user_signature=True,
-        divider=2 * unichr(160) + ">" + 2 * unichr(160),
+        divider=2 * chr(160) + ">" + 2 * chr(160),
         breadcrumbs_class="",
         **kwargs
     ):
@@ -3962,7 +3970,6 @@ class SQLFORM(FORM):
 
 
 class SQLTABLE(TABLE):
-
     """
     Given with a Rows object, as returned by a `db().select()`, generates
     an html table with the rows.
@@ -4294,8 +4301,6 @@ class ExportClass(object):
             """
             if value is None:
                 return "<NULL>"
-            elif isinstance(value, unicodeT):
-                return value.encode("utf8")
             elif isinstance(value, Reference):
                 return int(value)
             elif hasattr(value, "isoformat"):
@@ -4309,7 +4314,7 @@ class ExportClass(object):
         for record in self.rows:
             row = []
             for col in self.rows.colnames:
-                if not self.rows.db._adapter.REGEX_TABLE_DOT_FIELD.match(col):
+                if "." not in col:
                     row.append(record._extra[col])
                 else:
                     # The grid code modifies rows.colnames, adding double quotes
@@ -4353,7 +4358,7 @@ class ExporterTSV(ExportClass):
 
     def export(self):  # export TSV with field.represent
         if self.rows:
-            s = StringIO()
+            s = io.StringIO()
             self.rows.export_to_csv_file(
                 s, represent=True, delimiter="\t", newline="\n"
             )
@@ -4372,7 +4377,7 @@ class ExporterTSV_hidden(ExportClass):
 
     def export(self):
         if self.rows:
-            s = StringIO()
+            s = io.StringIO()
             self.rows.export_to_csv_file(s, delimiter="\t", newline="\n")
             return s.getvalue()
         else:
@@ -4390,7 +4395,7 @@ class ExporterCSV(ExportClass):
 
     def export(self):  # export CSV with field.represent
         if self.rows:
-            s = StringIO()
+            s = io.StringIO()
             self.rows.export_to_csv_file(s, represent=True)
             return s.getvalue()
         else:

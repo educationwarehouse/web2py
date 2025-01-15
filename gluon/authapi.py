@@ -9,7 +9,6 @@ import datetime
 from pydal.objects import Field, Row, Table
 
 from gluon import current
-from gluon._compat import long
 from gluon.settings import global_settings
 from gluon.storage import Messages, Settings, Storage
 from gluon.utils import web2py_uuid
@@ -320,7 +319,7 @@ class AuthAPI(object):
             if username or settings.cas_provider:
                 is_unique_username = [
                     IS_MATCH(
-                        "[\w\.\-]+",
+                        r"[\w\.\-]+",
                         strict=True,
                         error_message=self.messages.invalid_username,
                     ),
@@ -801,7 +800,7 @@ class AuthAPI(object):
                 (permission.group_id == group_id)
                 & (permission.name == name)
                 & (permission.table_name == str(table_name))
-                & (permission.record_id == long(record_id)),
+                & (permission.record_id == int(record_id)),
                 ignore_common_filters=True,
             )
             .select(limitby=(0, 1), orderby_on_limitby=False)
@@ -816,7 +815,7 @@ class AuthAPI(object):
                 group_id=group_id,
                 name=name,
                 table_name=str(table_name),
-                record_id=long(record_id),
+                record_id=int(record_id),
             )
         self.log_event(
             self.messages["add_permission_log"],
@@ -850,7 +849,7 @@ class AuthAPI(object):
         )
         return self.db(permission.group_id == group_id)(permission.name == name)(
             permission.table_name == str(table_name)
-        )(permission.record_id == long(record_id)).delete()
+        )(permission.record_id == int(record_id)).delete()
 
     def has_permission(
         self,
@@ -926,7 +925,7 @@ class AuthAPI(object):
 
     def _update_session_user(self, user):
         if global_settings.web2py_runtime_gae:
-            user = Row(self.table_user()._filter_fields(user, id=True))
+            user = Row(self.table_user()._filter_fields(user, allow_id=True))
             delattr(user, self.settings.password_field)
         else:
             user = Row(user)
@@ -1139,10 +1138,10 @@ class AuthAPI(object):
         table_user.registration_key.default = key
 
         result = table_user.validate_and_insert(**kwargs)
-        if result.errors:
-            return {"errors": result.errors.as_dict(), "message": None, "user": None}
+        if result.get("errors"):
+            return {"errors": result["errors"], "message": None, "user": None}
 
-        user = table_user[result.id]
+        user = table_user[result["id"]]
 
         message = self.messages.registration_successful
 
@@ -1150,7 +1149,7 @@ class AuthAPI(object):
             d = user.as_dict()
             description = self.messages.group_description % d
             group_id = self.add_group(settings.create_user_groups % d, description)
-            self.add_membership(group_id, result.id)
+            self.add_membership(group_id, result["id"])
 
         if self.settings.everybody_group_id:
             self.add_membership(self.settings.everybody_group_id, result)
@@ -1206,9 +1205,9 @@ class AuthAPI(object):
         result = self.db(table_user.id == self.user.id).validate_and_update(**kwargs)
         user = table_user[self.user.id]
 
-        if result.errors:
+        if result.get("errors"):
             return {
-                "errors": result.errors,
+                "errors": result["errors"],
                 "message": None,
                 "user": {
                     k: user[k] for k in table_user.fields if table_user[k].readable
@@ -1257,9 +1256,9 @@ class AuthAPI(object):
             requires[0] = CRYPT(
                 **requires[0].__dict__
             )  # Copy the existing CRYPT attributes
-            requires[
-                0
-            ].min_length = 0  # But do not enforce minimum length for the old password
+            requires[0].min_length = (
+                0  # But do not enforce minimum length for the old password
+            )
 
         old_password = kwargs.get("old_password", "")
         new_password = kwargs.get("new_password", "")
@@ -1290,9 +1289,9 @@ class AuthAPI(object):
         else:
             d = {passfield: new_password}
             resp = s.validate_and_update(**d)
-            if resp.errors:
+            if resp.get("errors"):
                 return {
-                    "errors": {"new_password": resp.errors[passfield]},
+                    "errors": {"new_password": resp["errors"][passfield]},
                     "message": None,
                 }
             if log is DEFAULT:

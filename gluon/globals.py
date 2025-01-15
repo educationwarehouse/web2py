@@ -14,26 +14,30 @@ Contains the classes for the global used variables:
 """
 import cgi
 import copy
+import copyreg
 # from types import DictionaryType
 import datetime
 import hashlib
+import io
 import json as json_parser
 import os
+import pickle
 import re
 import sys
 import tempfile
 import threading
 import traceback
+from http import cookies as Cookie
+from io import BytesIO, StringIO
 from pickle import DICT, EMPTY_DICT, MARK, Pickler
+from urllib import parse as urlparse
+from urllib.parse import quote as urllib_quote
 
 from pydal.contrib import portalocker
+from pydal.utils import utcnow
 
 import gluon.settings as settings
 from gluon import recfile
-from gluon._compat import (PY2, BytesIO, Cookie, StringIO, copyreg,
-                           hashlib_md5, iteritems, long, pickle, to_bytes,
-                           to_native, to_unicode, unicodeT, urllib_quote,
-                           urlparse)
 from gluon.cache import CacheInRam
 from gluon.contenttype import contenttype
 from gluon.fileutils import up
@@ -92,12 +96,8 @@ class SortingPickler(Pickler):
         self._batch_setitems([(key, obj[key]) for key in sorted(obj)])
 
 
-if PY2:
-    SortingPickler.dispatch = copy.copy(Pickler.dispatch)
-    SortingPickler.dispatch[dict] = SortingPickler.save_dict
-else:
-    SortingPickler.dispatch_table = copyreg.dispatch_table.copy()
-    SortingPickler.dispatch_table[dict] = SortingPickler.save_dict
+SortingPickler.dispatch_table = copyreg.dispatch_table.copy()
+SortingPickler.dispatch_table[dict] = SortingPickler.save_dict
 
 
 def sorting_dumps(obj, protocol=None):
@@ -168,7 +168,6 @@ def copystream_progress(request, chunk_size=10**5):
 
 
 class Request(Storage):
-
     """
     Defines the request object and the default values of its members
 
@@ -184,7 +183,7 @@ class Request(Storage):
     - args
     - extension
     - now: datetime.datetime.now()
-    - utcnow : datetime.datetime.utcnow()
+    - utcnow : pydal.utils.utcnow
     - is_local
     - is_https
     - restful()
@@ -207,7 +206,7 @@ class Request(Storage):
         self.args = List()
         self.extension = "html"
         self.now = datetime.datetime.now()
-        self.utcnow = datetime.datetime.utcnow()
+        self.utcnow = utcnow()
         self.is_restful = False
         self.is_https = False
         self.is_local = False
@@ -220,7 +219,7 @@ class Request(Storage):
         dget = urlparse.parse_qs(query_string, keep_blank_values=1)
         # Ref: https://docs.python.org/2/library/cgi.html#cgi.parse_qs
         get_vars = self._get_vars = Storage(dget)
-        for key, value in iteritems(get_vars):
+        for key, value in get_vars.items():
             if isinstance(value, list) and len(value) == 1:
                 get_vars[key] = value[0]
 
@@ -232,16 +231,11 @@ class Request(Storage):
         post_vars = self._post_vars = Storage()
         body = self.body
         # if content-type is application/json, we must read the body
-        is_json = env.get("content_type", "")[:16] == "application/json"
+        is_json = env.get("CONTENT_TYPE", "")[:16] == "application/json"
 
         if is_json:
             try:
-                # In Python 3 versions prior to 3.6 load doesn't accept bytes and
-                # bytearray, so we read the body convert to native and use loads
-                # instead of load.
-                # This line can be simplified to json_vars = json_parser.load(body)
-                # if and when we drop support for python versions under 3.6
-                json_vars = json_parser.loads(to_native(body.read()))
+                json_vars = json_parser.loads(body)
             except:
                 # incoherent request bodies can still be parsed "ad-hoc"
                 json_vars = {}
@@ -311,10 +305,23 @@ class Request(Storage):
                 raise HTTP(400, "Bad Request - HTTP body is incomplete")
         return self._body
 
+    def parse_content_type(self):
+        from email.policy import EmailPolicy as mime
+
+        header = mime.header_factory("content-type", self.env.content_type)
+
+        self.encoding = header.params.get("charset")
+        self.content_type = header.content_type
+
+    def get_body(self):
+        self.body.seek(0)
+        body = self.body.read()
+        return str(body, self.encoding or "utf8")
+
     def parse_all_vars(self):
         """Merges get_vars and post_vars to vars"""
         self._vars = copy.copy(self.get_vars)
-        for key, value in iteritems(self.post_vars):
+        for key, value in self.post_vars.items():
             if key not in self._vars:
                 self._vars[key] = value
             else:
@@ -440,7 +447,6 @@ class Request(Storage):
 
 
 class Response(Storage):
-
     """
     Defines the response object and the default values of its members
     response.write(   ) can be used to write in the output html
@@ -473,7 +479,7 @@ class Response(Storage):
         if not escape:
             self.body.write(str(data))
         else:
-            self.body.write(to_native(xmlescape(data)))
+            self.body.write(xmlescape(data))
 
     def render(self, *a, **b):
         from gluon.compileapp import run_view_in
@@ -495,10 +501,8 @@ class Response(Storage):
         self._vars.update(b)
         self._view_environment.update(self._vars)
         if view:
-            from gluon._compat import StringIO
-
             (obody, oview) = (self.body, self.view)
-            (self.body, self.view) = (StringIO(), view)
+            (self.body, self.view) = (io.StringIO(), view)
             page = run_view_in(self._view_environment)
             self.body.close()
             (self.body, self.view) = (obody, oview)
@@ -508,20 +512,19 @@ class Response(Storage):
 
     def include_meta(self):
         s = "\n"
-        for meta in iteritems((self.meta or {})):
+        for meta in (self.meta or {}).items():
             k, v = meta
             if isinstance(v, dict):
                 s += (
                     "<meta"
-                    + "".join(
-                        ' %s="%s"'
-                        % (to_native(xmlescape(key)), to_native(xmlescape(v[key])))
-                        for key in v
-                    )
+                    + "".join(f' {xmlescape(key)}="{xmlescape(v[key])}"' for key in v)
                     + " />\n"
                 )
             else:
-                s += '<meta name="%s" content="%s" />\n' % (k, to_native(xmlescape(v)))
+                s += '<meta name="%s" content="%s" />\n' % (
+                    k,
+                    xmlescape(str(v)),
+                )  # FIXME
         self.write(s, escape=False)
 
     def include_files(self, extensions=None):
@@ -580,7 +583,7 @@ class Response(Storage):
                     (self.optimize_css and f.has_css) or (self.optimize_js and f.has_js)
                 ):
                     # cache for 5 minutes by default
-                    key = hashlib_md5(repr(f)).hexdigest()
+                    key = hashlib.md5(repr(f).encode("utf8")).hexdigest()
                     cache = self.cache_includes or (current.cache.ram, 60 * 5)
 
                     def call_minify(files=f):
@@ -675,7 +678,7 @@ class Response(Storage):
 
         if not request:
             request = current.request
-        if isinstance(stream, (str, unicodeT)):
+        if isinstance(stream, str):
             stream_file_or_304_or_206(
                 stream,
                 chunk_size=chunk_size,
@@ -761,12 +764,10 @@ class Response(Storage):
         if attachment:
             # Browsers still don't have a simple uniform way to have non ascii
             # characters in the filename so for now we are percent encoding it
-            if isinstance(download_filename, unicodeT):
-                download_filename = download_filename.encode("utf-8")
             download_filename = urllib_quote(download_filename)
-            headers[
-                "Content-Disposition"
-            ] = 'attachment; filename="%s"' % download_filename.replace('"', '\\"')
+            headers["Content-Disposition"] = (
+                'attachment; filename="%s"' % download_filename.replace('"', '\\"')
+            )
         return self.stream(stream, chunk_size=chunk_size, request=request)
 
     def json(self, data, default=None, indent=None):
@@ -815,7 +816,7 @@ class Response(Storage):
         dbstats = []
         dbtables = {}
         infos = DAL.get_instances()
-        for k, v in iteritems(infos):
+        for k, v in infos.items():
             dbstats.append(
                 TABLE(
                     *[
@@ -1073,7 +1074,7 @@ class Session(Storage):
                 # Get session data out of the database
                 try:
                     (record_id, unique_key) = response.session_id.split(":")
-                    record_id = long(record_id)
+                    record_id = int(record_id)
                 except (TypeError, ValueError):
                     record_id = None
 
@@ -1114,9 +1115,9 @@ class Session(Storage):
             response.cookies[response.session_id_name] = response.session_id
             response.cookies[response.session_id_name]["path"] = "/"
             if cookie_expires:
-                response.cookies[response.session_id_name][
-                    "expires"
-                ] = cookie_expires.strftime(FMT)
+                response.cookies[response.session_id_name]["expires"] = (
+                    cookie_expires.strftime(FMT)
+                )
 
         session_pickled = pickle.dumps(self, pickle.HIGHEST_PROTOCOL)
         response.session_hash = hashlib.md5(session_pickled).hexdigest()
@@ -1169,10 +1170,10 @@ class Session(Storage):
                 return
             (record_id, sep, unique_key) = response.session_id.partition(":")
 
-            if record_id.isdigit() and long(record_id) > 0:
+            if record_id.isdigit() and int(record_id) > 0:
                 new_unique_key = web2py_uuid()
                 row = table(record_id)
-                if row and to_native(row["unique_key"]) == to_native(unique_key):
+                if row and row["unique_key"] == unique_key:
                     table._db(table.id == record_id).update(unique_key=new_unique_key)
                 else:
                     record_id = None
@@ -1261,7 +1262,7 @@ class Session(Storage):
             table = response.session_db_table
             if response.session_id:
                 (record_id, sep, unique_key) = response.session_id.partition(":")
-                if record_id.isdigit() and long(record_id) > 0:
+                if record_id.isdigit() and int(record_id) > 0:
                     table._db(table.id == record_id).delete()
         Storage.clear(self)
 
@@ -1305,7 +1306,7 @@ class Session(Storage):
         )
         rcookies = response.cookies
         rcookies.pop(name, None)
-        rcookies[name] = to_native(value)
+        rcookies[name] = value
         rcookies[name]["path"] = "/"
         expires = response.session_cookie_expires
         if isinstance(expires, datetime.datetime):

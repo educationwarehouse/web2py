@@ -12,10 +12,12 @@ Background processes made simple
 
 from __future__ import print_function
 
+import builtins
 import datetime
 import logging
 import multiprocessing
 import os
+import queue as Queue
 import re
 import signal
 import socket
@@ -28,10 +30,13 @@ import types
 from functools import reduce
 from json import dumps, loads
 
+from pydal.base import DEFAULT
+from pydal.objects import Query
+from pydal.utils import utcnow
+
+
 from gluon import (DAL, IS_DATETIME, IS_EMPTY_OR, IS_IN_DB, IS_IN_SET,
                    IS_INT_IN_RANGE, IS_NOT_EMPTY, IS_NOT_IN_DB, Field)
-from gluon._compat import (PY2, Queue, integer_types, iteritems, long,
-                           string_types, to_bytes)
 from gluon.storage import Storage
 from gluon.utils import web2py_uuid
 
@@ -455,33 +460,6 @@ class CronParser(object):
 # borrowed from http://stackoverflow.com/questions/956867/
 
 
-def _decode_list(lst):
-    if not PY2:
-        return lst
-    newlist = []
-    for i in lst:
-        if isinstance(i, string_types):
-            i = to_bytes(i)
-        elif isinstance(i, list):
-            i = _decode_list(i)
-        newlist.append(i)
-    return newlist
-
-
-def _decode_dict(dct):
-    if not PY2:
-        return dct
-    newdict = {}
-    for k, v in iteritems(dct):
-        k = to_bytes(k)
-        if isinstance(v, string_types):
-            v = to_bytes(v)
-        elif isinstance(v, list):
-            v = _decode_list(v)
-        newdict[k] = v
-    return newdict
-
-
 def executor(retq, task, outq):
     """The function used to execute tasks in the background process."""
     logger.debug("    task started")
@@ -543,15 +521,12 @@ def executor(retq, task, outq):
             # Inject W2P_TASK into current
             current.W2P_TASK = W2P_TASK
             globals().update(_env)
-            args = _decode_list(loads(task.args))
-            vars = loads(task.vars, object_hook=_decode_dict)
+            args = loads(task.args)
+            vars = loads(task.vars)
             result = dumps(_function(*args, **vars))
         else:
             # for testing purpose only
-            result = eval(task.function)(
-                *loads(task.args, object_hook=_decode_dict),
-                **loads(task.vars, object_hook=_decode_dict)
-            )
+            result = eval(task.function)(*loads(task.args), **loads(task.vars))
         if len(result) >= 1024:
             fd, temp_path = tempfile.mkstemp(suffix=".w2p_sched")
             with os.fdopen(fd, "w") as f:
@@ -658,7 +633,7 @@ class Scheduler(threading.Thread):
         use_spawn=False,
     ):
         threading.Thread.__init__(self)
-        self.setDaemon(True)
+        self.daemon = True
         self.process = None  # the background process
         self.process_queues = (None, None)
         self.have_heartbeat = True  # set to False to kill
@@ -708,7 +683,7 @@ class Scheduler(threading.Thread):
         """
         outq = None
         retq = None
-        if self.use_spawn and not PY2:
+        if self.use_spawn:
             ctx = multiprocessing.get_context("spawn")
             outq = ctx.Queue()
             retq = ctx.Queue(maxsize=1)
@@ -865,7 +840,7 @@ class Scheduler(threading.Thread):
 
     def now(self):
         """Shortcut that fetches current time based on UTC preferences."""
-        return self.utc_time and datetime.datetime.utcnow() or datetime.datetime.now()
+        return self.utc_time and utcnow() or datetime.datetime.now()
 
     def set_requirements(self, scheduler_task):
         """Called to set defaults for lazy_tables connections."""
@@ -879,7 +854,6 @@ class Scheduler(threading.Thread):
 
     def define_tables(self, db, migrate):
         """Define Scheduler tables structure."""
-        from pydal.base import DEFAULT
 
         logger.debug("defining tables (migrate=%s)", migrate)
         now = self.now
@@ -902,9 +876,9 @@ class Scheduler(threading.Thread):
             Field("broadcast", "boolean", default=False),
             Field(
                 "function_name",
-                requires=IS_IN_SET(sorted(self.tasks.keys()))
-                if self.tasks
-                else DEFAULT,
+                requires=(
+                    IS_IN_SET(sorted(self.tasks.keys())) if self.tasks else DEFAULT
+                ),
             ),
             Field(
                 "uuid",
@@ -1709,12 +1683,12 @@ class Scheduler(threading.Thread):
             kwargs.update(next_run_time=kwargs["start_time"])
         db = self.db
         rtn = db.scheduler_task.validate_and_insert(**kwargs)
-        if not rtn.errors:
-            rtn.uuid = tuuid
+        if not rtn.get("errors"):
+            rtn["uuid"] = tuuid
             if immediate:
                 db((db.scheduler_worker.is_ticker == True)).update(status=PICK)
         else:
-            rtn.uuid = None
+            rtn["uuid"] = None
         return rtn
 
     def task_status(self, ref, output=False):
@@ -1739,12 +1713,11 @@ class Scheduler(threading.Thread):
             have all fields == None
 
         """
-        from pydal.objects import Query
 
         db = self.db
         sr = db.scheduler_run
         st = db.scheduler_task
-        if isinstance(ref, integer_types):
+        if isinstance(ref, int):
             q = st.id == ref
         elif isinstance(ref, str):
             q = st.uuid == ref
@@ -1767,7 +1740,7 @@ class Scheduler(threading.Thread):
         if row and output:
             row.result = (
                 row.scheduler_run.run_result
-                and loads(row.scheduler_run.run_result, object_hook=_decode_dict)
+                and loads(row.scheduler_run.run_result)
                 or None
             )
         return row
@@ -1925,7 +1898,7 @@ def main():
             filename = filename[:-3]
         sys.path.append(path)
         print("importing tasks...")
-        tasks = __import__(filename, globals(), locals(), [], -1).tasks
+        tasks = builtins.__import__(filename, globals(), locals(), [], -1).tasks
         print("tasks found: " + ", ".join(list(tasks.keys())))
     else:
         tasks = {}

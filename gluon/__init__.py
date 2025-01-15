@@ -10,7 +10,10 @@ Web2Py framework modules
 ========================
 """
 
+__version__ = "3.0.3"
+
 __all__ = [
+    "__version__",
     "A",
     "B",
     "BEAUTIFY",
@@ -114,9 +117,11 @@ __all__ = [
     "redirect",
     "current",
     "embed64",
+    "wsgibase",
 ]
 
 #: add pydal to sys.modules
+import builtins
 import os
 import sys
 
@@ -128,16 +133,14 @@ MESSAGE = (
     + "You can also download a complete copy from http://www.web2py.com."
 )
 
-
 def import_packages():
-    for package, location in [("pydal", "dal"), ("yatl", "yatl")]:
+    for package in ["pydal", "yatl", "rocket3"]:
         try:
-            path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "packages", location
-            )
+            base = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(base, "packages", package)
             if path not in sys.path:
                 sys.path.insert(0, path)
-            sys.modules[package] = __import__(package)
+            sys.modules[package] = builtins.__import__(package)
         except ImportError:
             raise RuntimeError(MESSAGE % package)
 
@@ -151,6 +154,7 @@ from .html import *
 from .http import HTTP, redirect
 from .sqlhtml import SQLFORM, SQLTABLE
 from .validators import *
+from .main import wsgibase
 
 # Dummy code to enable code completion in IDE's.
 if 0:

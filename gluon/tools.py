@@ -10,7 +10,9 @@ Auth, Mail, PluginManager and various utilities
 ------------------------------------------------
 """
 
+import _thread as thread
 import base64
+import configparser
 import datetime
 import email.utils
 import fnmatch
@@ -20,25 +22,34 @@ import hmac
 import json
 import logging
 import os
+import pickle
 import random
 import re
 import smtplib
 import sys
 import time
 import traceback
+from email import encoders as Encoders
 from email import message_from_string
+from email.charset import QP as charset_QP
+from email.charset import Charset, add_charset
+from email.header import Header
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from functools import reduce
+from http import cookies as Cookie
+from urllib import parse as urlparse
+from urllib import request as urllib2
+from urllib.parse import quote as urllib_quote
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from pydal.objects import Query, Row, Set
+from pydal.utils import utcnow
 
 import gluon.serializers as serializers
 from gluon import *
-from gluon._compat import (Charset, Cookie, Encoders, Header, MIMEBase,
-                           MIMEMultipart, MIMEText, StringIO, add_charset,
-                           basestring, charset_QP, configparser, iteritems,
-                           long, pickle, string_types, thread, to_bytes,
-                           to_native, to_unicode, unicodeT, urlencode, urllib2,
-                           urllib_quote, urlopen, urlparse)
 from gluon.authapi import AuthAPI
 from gluon.contenttype import contenttype
 from gluon.contrib.autolinks import expand_one
@@ -245,8 +256,6 @@ class Mail(object):
             content_type: content type of the attachment; if set to None,
                 it will be fetched from filename using gluon.contenttype
                 module
-            encoding: encoding of all strings passed to this function (except
-                attachment body)
 
         Content ID is used to identify attachments within the html body;
         in example, attached image with content ID 'photo' may be used in
@@ -279,14 +288,7 @@ class Mail(object):
                 SOMEOTHERBASE64CONTENT=
         """
 
-        def __init__(
-            self,
-            payload,
-            filename=None,
-            content_id=None,
-            content_type=None,
-            encoding="utf-8",
-        ):
+        def __init__(self, payload, filename=None, content_id=None, content_type=None):
             if isinstance(payload, str):
                 if filename is None:
                     filename = os.path.basename(payload)
@@ -303,7 +305,7 @@ class Mail(object):
             self.set_payload(payload)
             self.add_header("Content-Disposition", "attachment", filename=filename)
             if content_id is not None:
-                self["Content-Id"] = "<%s>" % to_native(content_id, encoding)
+                self["Content-Id"] = "<%s>" % str(content_id)
             Encoders.encode_base64(self)
 
     def __init__(self, server=None, sender=None, login=None, tls=True):
@@ -342,7 +344,6 @@ class Mail(object):
         bcc=None,
         reply_to=None,
         sender=None,
-        encoding="utf-8",
         raw=False,
         headers={},
         from_address=None,
@@ -357,6 +358,7 @@ class Mail(object):
         x509_sign_certfile=None,
         x509_crypt_certfiles=None,
         x509_nocerts=None,
+        remote_server=None,
     ):
         """
         Sends an email using data specified in constructor
@@ -385,8 +387,6 @@ class Mail(object):
             bcc: list or tuple of blind carbon copy receiver addresses; will
                 also accept single object
             reply_to: address to which reply should be composed
-            encoding: encoding of all strings passed to this method (including
-                message bodies)
             headers: dictionary of headers to refine the headers just before
                 sending mail, e.g. `{'X-Mailer' : 'web2py mailer'}`
             from_address: address to appear in the 'From:' header, this is not
@@ -454,6 +454,11 @@ class Mail(object):
         Returns:
             True on success, False on failure.
 
+        By default, mail.send opens a connection to the smtp server for each mail.
+        This could be costly if you are sending many emails from a queue.
+        Use remote_server to override internal server connection facility,
+        but do remember to clean up after you are done with the server.
+
         Before return, method updates two object's fields:
 
             - self.result: return value of smtplib.SMTP.sendmail() or GAE's
@@ -488,14 +493,9 @@ class Mail(object):
             payload_in = MIMEMultipart("mixed")
         elif raw:
             # no encoding configuration for raw messages
-            if not isinstance(message, basestring):
-                message = message.read()
-            if isinstance(message, unicodeT):
-                text = message.encode("utf-8")
-            elif not encoding == "utf-8":
-                text = message.decode(encoding).encode("utf-8")
-            else:
-                text = message
+            if not isinstance(message, str):
+                message = message.read().decode("utf8")
+            text = message
             # No charset passed to avoid transport encoding
             # NOTE: some unicode encoded strings will produce
             # unreadable mail contents.
@@ -529,19 +529,11 @@ class Mail(object):
 
         if (text is not None or html is not None) and (not raw):
             if text is not None:
-                if not isinstance(text, basestring):
-                    text = text.read()
-                if isinstance(text, unicodeT):
-                    text = text.encode("utf-8")
-                elif not encoding == "utf-8":
-                    text = text.decode(encoding).encode("utf-8")
+                if not isinstance(text, str):
+                    text = text.read().decode("utf8")
             if html is not None:
-                if not isinstance(html, basestring):
-                    html = html.read()
-                if isinstance(html, unicodeT):
-                    html = html.encode("utf-8")
-                elif not encoding == "utf-8":
-                    html = html.decode(encoding).encode("utf-8")
+                if not isinstance(html, str):
+                    html = html.read().decode("utf8")
 
             # Construct mime part only if needed
             if text is not None and html:
@@ -817,25 +809,23 @@ class Mail(object):
             payload = payload_in
 
         if from_address:
-            payload["From"] = encoded_or_raw(to_unicode(from_address, encoding))
+            payload["From"] = from_address
         else:
-            payload["From"] = encoded_or_raw(to_unicode(sender, encoding))
+            payload["From"] = sender
         origTo = to[:]
         if to:
-            payload["To"] = encoded_or_raw(to_unicode(", ".join(to), encoding))
+            payload["To"] = ", ".join(to)
         if reply_to:
-            payload["Reply-To"] = encoded_or_raw(
-                to_unicode(", ".join(reply_to), encoding)
-            )
+            payload["Reply-To"] = ", ".join(reply_to)
         if cc:
-            payload["Cc"] = encoded_or_raw(to_unicode(", ".join(cc), encoding))
+            payload["Cc"] = ", ".join(cc)
             to.extend(cc)
         if bcc:
             to.extend(bcc)
-        payload["Subject"] = encoded_or_raw(to_unicode(subject, encoding))
+        payload["Subject"] = subject
         payload["Date"] = email.utils.formatdate()
-        for k, v in iteritems(headers):
-            payload[k] = encoded_or_raw(to_unicode(v, encoding))
+        for k, v in headers.items():
+            payload[k] = v
 
         dkim = dkim or self.settings.dkim
         list_unsubscribe = list_unsubscribe or self.settings.list_unsubscribe
@@ -880,8 +870,8 @@ class Mail(object):
                     result = mail.send_mail(
                         sender=sender,
                         to=origTo,
-                        subject=to_unicode(subject, encoding),
-                        body=to_unicode(text or "", encoding),
+                        subject=subject,
+                        body=text,
                         html=html,
                         attachments=attachments,
                         **xcc
@@ -890,8 +880,8 @@ class Mail(object):
                     result = mail.send_mail(
                         sender=sender,
                         to=origTo,
-                        subject=to_unicode(subject, encoding),
-                        body=to_unicode(text or "", encoding),
+                        subject=subject,
+                        body=text or "",
                         html=html,
                         **xcc
                     )
@@ -899,8 +889,8 @@ class Mail(object):
                     result = mail.send_mail(
                         sender=sender,
                         to=origTo,
-                        subject=to_unicode(subject, encoding),
-                        body=to_unicode(text or "", encoding),
+                        subject=subject,
+                        body=text or "",
                         **xcc
                     )
             elif self.settings.server == "aws":
@@ -922,25 +912,27 @@ class Mail(object):
                 smtp_args = self.settings.server.split(":")
                 kwargs = dict(timeout=self.settings.timeout)
                 func = smtplib.SMTP_SSL if self.settings.ssl else smtplib.SMTP
-                server = func(*smtp_args, **kwargs)
+                server = remote_server or func(*smtp_args, **kwargs)
                 try:
-                    if self.settings.tls and not self.settings.ssl:
-                        server.ehlo(self.settings.hostname)
-                        server.starttls()
-                        server.ehlo(self.settings.hostname)
-                    if self.settings.login:
-                        server.login(*self.settings.login.split(":", 1))
+                    if not remote_server:
+                        if self.settings.tls and not self.settings.ssl:
+                            server.ehlo(self.settings.hostname)
+                            server.starttls()
+                            server.ehlo(self.settings.hostname)
+                        if self.settings.login:
+                            server.login(*self.settings.login.split(":", 1))
                     result = server.sendmail(sender, to, payload.as_string())
                 finally:
                     # do not want to hide errors raising some exception here
-                    try:
-                        server.quit()
-                    except smtplib.SMTPException:
-                        # ensure to close any socket with SMTP server
+                    if not remote_server:
                         try:
-                            server.close()
-                        except Exception:
-                            pass
+                            server.quit()
+                        except smtplib.SMTPException:
+                            # ensure to close any socket with SMTP server
+                            try:
+                                server.close()
+                            except Exception:
+                                pass
         except Exception as e:
             logger.warning("Mail.send failure:%s" % e)
             self.result = result
@@ -1068,17 +1060,17 @@ class Recaptcha2(DIV):
         ).encode("utf-8")
         request = urllib2.Request(
             url=self.VERIFY_SERVER,
-            data=to_bytes(params),
+            data=params,
             headers={
                 "Content-type": "application/x-www-form-urlencoded",
                 "User-agent": "reCAPTCHA Python",
             },
         )
         httpresp = urlopen(request)
-        content = httpresp.read()
+        content = httpresp.read().decode("utf8")
         httpresp.close()
         try:
-            response_dict = json.loads(to_native(content))
+            response_dict = json.loads(content)
         except:
             self.errors["captcha"] = self.error_message
             return False
@@ -1307,7 +1299,7 @@ class AuthJWT(object):
         self.header_prefix = header_prefix
         self.jwt_add_header = jwt_add_header or {}
         base_header = {"alg": self.algorithm, "typ": "JWT"}
-        for k, v in iteritems(self.jwt_add_header):
+        for k, v in self.jwt_add_header.items():
             base_header[k] = v
         self.cached_b64h = self.jwt_b64e(json.dumps(base_header))
         digestmod_mapping = {
@@ -1326,59 +1318,61 @@ class AuthJWT(object):
         self.recvd_token = None
 
     @staticmethod
-    def jwt_b64e(string):
-        string = to_bytes(string)
-        return base64.urlsafe_b64encode(string).strip(b"=")
+    def jwt_b64e(text):
+        if isinstance(text, str):
+            text = text.encode("utf8")
+        return base64.urlsafe_b64encode(text).strip(b"=")
 
     @staticmethod
-    def jwt_b64d(string):
+    def jwt_b64d(text):
         """base64 decodes a single bytestring (and is tolerant to getting
         called with a unicode string).
         The result is also a bytestring.
         """
-        string = to_bytes(string, "ascii", "ignore")
-        return base64.urlsafe_b64decode(string + b"=" * (-len(string) % 4))
+        if isinstance(text, str):
+            text = text.encode("ascii", "ignore")
+        return base64.urlsafe_b64decode(text + b"=" * (-len(text) % 4))
 
     def generate_token(self, payload):
-        secret = to_bytes(self.secret_key)
+        secret = self.secret_key.encode("utf8")
         if self.salt:
             if callable(self.salt):
                 secret = "%s$%s" % (secret, self.salt(payload))
             else:
                 secret = "%s$%s" % (secret, self.salt)
-            if isinstance(secret, unicodeT):
+            if isinstance(secret, str):
                 secret = secret.encode("ascii", "ignore")
         b64h = self.cached_b64h
         b64p = self.jwt_b64e(serializers.json(payload))
         jbody = b64h + b"." + b64p
         mauth = hmac.new(key=secret, msg=jbody, digestmod=self.digestmod)
         jsign = self.jwt_b64e(mauth.digest())
-        return to_native(jbody + b"." + jsign)
+        return (jbody + b"." + jsign).decode("utf8")
 
     def verify_signature(self, body, signature, secret):
         mauth = hmac.new(key=secret, msg=body, digestmod=self.digestmod)
         return compare(self.jwt_b64e(mauth.digest()), signature)
 
     def load_token(self, token):
-        token = to_bytes(token, "utf-8", "strict")
+        token = token.encode("utf-8", "strict")
         body, sig = token.rsplit(b".", 1)
         b64h, b64b = body.split(b".", 1)
         if b64h != self.cached_b64h:
             # header not the same
             raise HTTP(400, "Invalid JWT Header")
         secret = self.secret_key
-        tokend = serializers.loads_json(to_native(self.jwt_b64d(b64b)))
+        tokend = serializers.loads_json(self.jwt_b64d(b64b).decode("utf8"))
         if self.salt:
             if callable(self.salt):
                 secret = "%s$%s" % (secret, self.salt(tokend))
             else:
                 secret = "%s$%s" % (secret, self.salt)
-        secret = to_bytes(secret, "ascii", "ignore")
+        secret = secret.encode("ascii", "ignore")
         if not self.verify_signature(body, sig, secret):
             # signature verification failed
             raise HTTP(400, "Token signature is invalid")
         if self.verify_expiration:
-            now = time.mktime(datetime.datetime.utcnow().timetuple())
+            now = time.mktime(utcnow().timetuple())
             if tokend["exp"] + self.leeway < now:
                 raise HTTP(400, "Token is expired")
         if callable(self.before_authorization):
@@ -1394,9 +1388,9 @@ class AuthJWT(object):
         """
         # TODO: Check the following comment
         # is the following safe or should we use
-        # calendar.timegm(datetime.datetime.utcnow().timetuple())
+        # calendar.timegm(utcnow().timetuple())
         # result seem to be the same (seconds since epoch, in UTC)
-        now = time.mktime(datetime.datetime.utcnow().timetuple())
+        now = time.mktime(utcnow().timetuple())
         expires = now + self.expiration
         payload = dict(
             hmac_key=session_auth["hmac_key"],
@@ -1408,7 +1402,7 @@ class AuthJWT(object):
         return payload
 
     def refresh_token(self, orig_payload):
-        now = time.mktime(datetime.datetime.utcnow().timetuple())
+        now = time.mktime(utcnow().timetuple())
         if self.verify_expiration:
             orig_exp = orig_payload["exp"]
             if orig_exp + self.leeway < now:
@@ -1958,15 +1952,17 @@ class Auth(AuthAPI):
                 "Please ",
                 A(
                     "login",
-                    _href=self.settings.login_url
-                    + (
-                        "?_next="
-                        + urllib_quote(
-                            current.request.env.http_web2py_component_location
+                    _href=(
+                        self.settings.login_url
+                        + (
+                            "?_next="
+                            + urllib_quote(
+                                current.request.env.http_web2py_component_location
+                            )
                         )
-                    )
-                    if current.request.env.http_web2py_component_location
-                    else "",
+                        if current.request.env.http_web2py_component_location
+                        else ""
+                    ),
                 ),
                 " to view this content.",
                 _class="not-authorized alert alert-block",
@@ -2616,8 +2612,8 @@ class Auth(AuthAPI):
         if basic_auth_realm:
             if callable(basic_auth_realm):
                 basic_auth_realm = basic_auth_realm()
-            elif isinstance(basic_auth_realm, string_types):
-                basic_realm = to_unicode(basic_auth_realm)
+            elif isinstance(basic_auth_realm, str):
+                basic_realm = basic_auth_realm
             elif basic_auth_realm is True:
                 basic_realm = "" + current.request.application
             http_401 = HTTP(
@@ -2769,11 +2765,9 @@ class Auth(AuthAPI):
                 success = True
 
         def build_response(body):
-            xml_body = to_native(
-                TAG["cas:serviceResponse"](
-                    body, **{"_xmlns:cas": "http://www.yale.edu/tp/cas"}
-                ).xml()
-            )
+            xml_body = TAG["cas:serviceResponse"](
+                body, **{"_xmlns:cas": "http://www.yale.edu/tp/cas"}
+            ).xml()
             return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_body
 
         if success:
@@ -3270,7 +3264,7 @@ class Auth(AuthAPI):
 
         # process authenticated users
         if user:
-            user = Row(table_user._filter_fields(user, id=True))
+            user = Row(table_user._filter_fields(user, allow_id=True))
             # process authenticated users
             # user wants to be logged in for longer
             self.login_user(user)
@@ -3883,7 +3877,7 @@ class Auth(AuthAPI):
         )
 
         if form.process().accepted:
-            emails = re.compile("[^\s'\"@<>,;:]+\@[^\s'\"@<>,;:]+").findall(
+            emails = re.compile(r"[^\s'\"@<>,;:]+\@[^\s'\"@<>,;:]+").findall(
                 form.vars.emails
             )
             # send the invitations
@@ -4206,9 +4200,9 @@ class Auth(AuthAPI):
             requires[0] = CRYPT(
                 **requires[0].__dict__
             )  # Copy the existing CRYPT attributes
-            requires[
-                0
-            ].min_length = 0  # But do not enforce minimum length for the old password
+            requires[0].min_length = (
+                0  # But do not enforce minimum length for the old password
+            )
         form = SQLFORM.factory(
             Field(
                 "old_password",
@@ -4417,7 +4411,7 @@ class Auth(AuthAPI):
             if not user:
                 raise HTTP(401, "Not Authorized")
             auth.impersonator = pickle.dumps(session, pickle.HIGHEST_PROTOCOL)
-            auth.user.update(table_user._filter_fields(user, True))
+            auth.user.update(table_user._filter_fields(user, allow_id=True))
             self.user = auth.user
             self.update_groups()
             log = self.messages["impersonate_log"]
@@ -4786,7 +4780,7 @@ class Auth(AuthAPI):
                     wiki = wiki["content"]
             else:
                 wiki = self._wiki()
-            if isinstance(wiki, basestring):
+            if isinstance(wiki, str):
                 wiki = XML(wiki)
             return wiki
 
@@ -5104,7 +5098,7 @@ class Crud(object):  # pragma: no cover
             separator=self.settings.label_separator,
         )
         if current.request.extension not in ("html", "load"):
-            return table._filter_fields(form.record, id=True)
+            return table._filter_fields(form.record, allow_id=True)
         return form
 
     def delete(
@@ -5748,8 +5742,8 @@ class Service(object):
             args = request.args
 
         def none_exception(value):
-            if isinstance(value, unicodeT):
-                return value.encode("utf8")
+            if isinstance(value, str):
+                return value
             if hasattr(value, "isoformat"):
                 return value.isoformat()[:19].replace("T", " ")
             if value is None:
@@ -6063,9 +6057,13 @@ class Service(object):
             documentation=documentation,
             ns=True,
         )
-        for method, (function, returns, args, doc, resp_elem_name) in iteritems(
-            procedures
-        ):
+        for method, (
+            function,
+            returns,
+            args,
+            doc,
+            resp_elem_name,
+        ) in procedures.items():
             dispatcher.register_function(
                 method, function, returns, args, doc, resp_elem_name
             )
@@ -6238,7 +6236,7 @@ def completion(callback):
 
 
 def prettydate(d, T=lambda x: x, utc=False):
-    now = datetime.datetime.utcnow() if utc else datetime.datetime.now()
+    now = utcnow() if utc else datetime.datetime.now()
     if isinstance(d, datetime.datetime):
         dt = now - d
     elif isinstance(d, datetime.date):
@@ -6622,7 +6620,7 @@ class Wiki(object):
         return LOAD(controller, function, args=args, ajax=True).xml()
 
     def get_renderer(self):
-        if isinstance(self.settings.render, basestring):
+        if isinstance(self.settings.render, str):
             r = getattr(self, "%s_render" % self.settings.render)
         elif callable(self.settings.render):
             r = self.settings.render
@@ -7078,8 +7076,8 @@ class Wiki(object):
         page = db.wiki_page(slug=slug)
         if not (page and self.can_edit(page)):
             return self.not_authorized(page)
-        self.auth.db.wiki_media.id.represent = (
-            lambda id, row: id
+        self.auth.db.wiki_media.id.represent = lambda id, row: (
+            id
             if not row.filename
             else SPAN(
                 "@////%i/%s.%s"
@@ -7225,7 +7223,7 @@ class Wiki(object):
         if menu_page:
             tree = {"": menu}
             regex = re.compile(
-                "[\r\n\t]*(?P<base>(\s*\-\s*)+)(?P<title>\w.*?)\s+\>\s+(?P<link>\S+)"
+                r"[\r\n\t]*(?P<base>(\s*\-\s*)+)(?P<title>\w.*?)\s+\>\s+(?P<link>\S+)"
             )
             for match in regex.finditer(self.fix_hostname(menu_page.body)):
                 base = match.group("base").replace(" ", "")

@@ -11,11 +11,11 @@ Restricted environment to execute application's code
 
 import logging
 import os
+import pickle
 import sys
 import traceback
 import types
 
-from gluon._compat import ClassType, pickle, to_bytes, unicodeT
 from gluon.html import BEAUTIFY, XML
 from gluon.http import HTTP
 from gluon.settings import global_settings
@@ -27,7 +27,6 @@ __all__ = ["RestrictedError", "restricted", "TicketStorage", "compile2"]
 
 
 class TicketStorage(Storage):
-
     """
     Defines the ticket object and the default values of its members (None)
     """
@@ -190,15 +189,11 @@ class RestrictedError(Exception):
 
     def __str__(self):
         # safely show an useful message to the user
-        try:
-            output = self.output
-            if not isinstance(output, str, bytes, bytearray):
-                output = str(output)
-            if isinstance(output, unicodeT):
-                output = to_bytes(output)
-        except:
-            output = ""
-        return output
+        return (
+            self.output.decode("utf8")
+            if isinstance(self.output, bytes)
+            else str(self.output)
+        )
 
 
 def compile2(code, layer):
@@ -246,7 +241,7 @@ def snapshot(info=None, context=5, code=None, environment=None):
     # if no exception info given, get current:
     etype, evalue, etb = info or sys.exc_info()
 
-    if isinstance(etype, ClassType):
+    if isinstance(etype, type):
         etype = etype.__name__
 
     # create a snapshot dict with some basic information

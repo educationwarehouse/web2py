@@ -1,4 +1,10 @@
 
+
+## 2.99 - 3.0.X
+
+- Experimantal versions supporing python 3.9 and later only
+- Include latest pydal, rocket3, yatl
+
 ## 2.27
 
 - python 3.11 support
@@ -26,7 +32,7 @@
 - fixed cache corruption issue
 
 ## 2.23
-	
+
 - fixed internal error in map_static() on self.args=None
 - fixed corner cases in prevent_open_redirect
 - fixed #2451, invalid chars in german translation
